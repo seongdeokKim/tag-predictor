@@ -76,7 +76,7 @@ def get_tag_index_map(tag_index_path):
 
 def read_csv_file(input_path, index_to_tag, tag_to_index):
     df = pd.read_csv(input_path)
-    df = df.iloc[400000, :]
+    df = df.iloc[:400000, :]
 
     questions = df["question"].tolist()
 
