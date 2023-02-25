@@ -1,22 +1,20 @@
-import torch
 from torch import nn
-from transformers import BertModel, AutoModel
+from transformers import BertModel
 
 class BertLabeler(nn.Module):
-    def __init__(
-            self,
-            config,
-            num_tags,
-            pretrain_path=None
-    ):
+    def __init__(self,
+                 config,
+                 num_tags,
+                 pretrain_path=None):
+        
         super(BertLabeler, self).__init__()
 
         self.config = config
         self.num_tags = num_tags
         if pretrain_path == None:
-            raise NotImplementedError
-        else:
             self.bert = BertModel.from_pretrained('bert-base-uncased')
+        else:
+            self.bert = BertModel.from_pretrained(pretrain_path)
         
         self.dropout = nn.Dropout(config.classifier_dropout)
         hidden_size = self.bert.pooler.dense.in_features
@@ -24,11 +22,9 @@ class BertLabeler(nn.Module):
         #classes: yes, no for each tag
         self.linear_heads = nn.ModuleList([nn.Linear(hidden_size, 2, bias=True) for _ in range(int(num_tags))])
 
-    def forward(
-            self,
-            input_ids,
-            attention_mask,
-    ):
+    def forward(self,
+                input_ids,
+                attention_mask):
 
         final_hidden = self.bert(
             input_ids, attention_mask=attention_mask

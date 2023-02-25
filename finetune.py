@@ -20,6 +20,7 @@ from sklearn.feature_extraction.text import CountVectorizer
 
 import pandas as pd
 import numpy as np
+from scipy import sparse
 
 # Block the warning message of tokenizer
 import logging
@@ -29,19 +30,19 @@ def define_argparser():
 
     p = argparse.ArgumentParser()
 
-    p.add_argument('--model_fn', default='/home/workspace/src/tag_predictor/helper/30.pth')
+    p.add_argument('--model_fn', default='/home/workspace/src/tag_predictor/helper/saved_model.pth')
 
-    p.add_argument('--train_fn', default='/home/workspace/src/preprocessed_train.csv')
+    p.add_argument('--train_fn', default='/home/workspace/src/tag_predictor/preprocessed_train.csv')
 
-    p.add_argument('--tag_index_path', type=str, default='/home/workspace/src/top_6000_tag_index.txt')
+    p.add_argument('--tag_index_path', type=str, default='/home/workspace/src/tag_predictor/top_6000_tag_index.txt')
     p.add_argument('--pretrain_path', type=str, default='bert-base-uncased')
     p.add_argument('--checkpoint_path', type=str, default=None)
+    # p.add_argument('--checkpoint_path', type=str, default='/home/workspace/src/tag_predictor/helper/saved_model.pth')
 
     p.add_argument('--hidden_size', type=int, default=768)
-
     p.add_argument('--device', type=str, default='cuda', choices=['cpu', 'cuda'])
 
-    p.add_argument('--batch_size', type=int, default=256)
+    p.add_argument('--batch_size', type=int, default=400)
     p.add_argument('--n_epochs', type=int, default=10)
 
     p.add_argument('--lr', type=float, default=3e-5)
@@ -75,8 +76,8 @@ def get_tag_index_map(tag_index_path):
 
 def read_csv_file(input_path, index_to_tag, tag_to_index):
     df = pd.read_csv(input_path)
-    df = df.iloc[:300000, :]
-    
+    df = df.iloc[400000, :]
+
     questions = df["question"].tolist()
 
     multilabels = np.zeros((len(questions), len(tag_to_index.keys())))
@@ -109,26 +110,30 @@ def get_loader(config, dataset_path, tokenizer, index_to_tag, tag_to_index):
 
     # Get dataloaders using given tokenizer as collate_fn.
     train_loader = DataLoader(
-        CustomDataset(questions[:train_idx], multilabels_df.iloc[:train_idx]),
+        CustomDataset(questions[:train_idx], 
+                      multilabels_df.iloc[:train_idx]),
         batch_size=config.batch_size,
         shuffle=True,
         collate_fn=TokenizerWrapper(tokenizer,
                                     config.max_length).collate,
     )
     valid_loader = DataLoader(
-        CustomDataset(questions[train_idx:valid_idx], multilabels_df.iloc[train_idx:valid_idx]),
+        CustomDataset(questions[train_idx:valid_idx], 
+                      multilabels_df.iloc[train_idx:valid_idx]),
         batch_size=config.batch_size,
         shuffle=False,
         collate_fn=TokenizerWrapper(tokenizer,
                                     config.max_length).collate,
     )
     test_loader = DataLoader(
-        CustomDataset(questions[valid_idx:], multilabels_df.iloc[valid_idx:]),
+        CustomDataset(questions[valid_idx:], 
+                      multilabels_df.iloc[valid_idx:]),
         batch_size=config.batch_size,
         shuffle=False,
         collate_fn=TokenizerWrapper(tokenizer,
                                     config.max_length).collate,
     )
+
     return train_loader, valid_loader, test_loader
 
 def main(config):
@@ -140,10 +145,9 @@ def main(config):
     tokenizer = AutoTokenizer.from_pretrained(config.pretrain_path)
 
     # Get dataloaders using tokenizer from untokenized corpus.
-    # train_loader, valid_loader, index_to_label, test_loader = get_loaders(config, tokenizer)
-    train_loader, valid_loader, test_loader = get_loader(
-        config, config.train_fn, tokenizer, index_to_tag, tag_to_index
-    )
+    train_loader, valid_loader, test_loader = get_loader(config, config.train_fn, 
+                                                         tokenizer, 
+                                                         index_to_tag, tag_to_index)
 
     print(
         '|train| =', len(train_loader) * config.batch_size,
@@ -162,19 +166,22 @@ def main(config):
     device = torch.device("cuda" if torch.cuda.is_available() and config.device == "cuda" else "cpu")
     if torch.cuda.is_available() and config.device == "cuda":
         print("Using", torch.cuda.device_count(), "GPUs!")
-        model = nn.DataParallel(model)
+        if torch.cuda.device_count() > 1:
+            model = nn.DataParallel(model)
         model = model.to(device)
         loss_func = loss_func.to(device)
 
         if config.checkpoint_path is not None:
-            checkpoint = torch.load(config.checkpoint_path, map_location='cuda')
+            checkpoint = torch.load(config.checkpoint_path, 
+                                    map_location='cuda')['bert']
             msg = model.load_state_dict(checkpoint, strict=True)
 
     else:
         model = model.to(device)
 
         if config.checkpoint_path is not None:
-            checkpoint = torch.load(config.checkpoint_path, map_location='cpu')
+            checkpoint = torch.load(config.checkpoint_path, 
+                                    map_location='cpu')['bert']
             msg = model.load_state_dict(checkpoint, strict=True)
 
     if config.use_radam:
@@ -195,41 +202,33 @@ def main(config):
             }
         ]
 
-        optimizer = optim.AdamW(
-            optimizer_grouped_parameters,
-            lr=config.lr,
-            betas=(config.beta1, config.beta2),
-            eps=config.adam_epsilon
-        )
+        optimizer = optim.AdamW(optimizer_grouped_parameters,
+                                lr=config.lr,
+                                betas=(config.beta1, config.beta2),
+                                eps=config.adam_epsilon)
 
     n_total_iterations = len(train_loader) * config.n_epochs
     n_warmup_steps = int(n_total_iterations * config.warmup_ratio)
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        n_warmup_steps,
-        n_total_iterations
-    )
+    scheduler = get_linear_schedule_with_warmup(optimizer,
+                                                n_warmup_steps,
+                                                n_total_iterations)
 
     # Start train.
     trainer = Trainer(config)
 
-    best_model = trainer.train(
-        model,
-        loss_func,
-        optimizer,
-        scheduler,
-        train_loader,
-        valid_loader,
-        index_to_tag,
-        device,
-    )
+    best_model = trainer.train(model,
+                               loss_func,
+                               optimizer,
+                               scheduler,
+                               train_loader,
+                               valid_loader,
+                               index_to_tag,
+                               device)
 
-    trainer.test(
-        best_model,
-        test_loader,
-        index_to_tag,
-        device,
-    )
+    trainer.test(best_model,
+                 test_loader,
+                 index_to_tag,
+                 device)
         
     torch.save({
         'bert': best_model.state_dict(),
